@@ -1,0 +1,43 @@
+seed: 42
+device: auto
+amp: true
+output_dir: runs/train
+
+model:
+  pretrained: true
+
+data:
+  train_images: ${KITTI_TRAIN_IMAGES}
+  train_annotations: ${KITTI_TRAIN_ANNOTATIONS}
+  val_images: ${KITTI_VAL_IMAGES}
+  val_annotations: ${KITTI_VAL_ANNOTATIONS}
+
+loader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: true
+
+train:
+  epochs: 36
+  log_interval: 20
+  eval_interval: 1
+
+optimizer:
+  type: sgd
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+
+lr:
+  backbone: 0.0001
+  classifier: 0.001
+  defender: 0.001
+
+scheduler:
+  type: cosine
+  warmup_epochs: 2
+  min_lr: 1e-5
+
+afl:
+  target_mask_ratio: 0.5
+  rho: 0.05
