@@ -7,14 +7,16 @@ from torch import nn
 from torch.optim import SGD
 from torch.optim.lr_scheduler import LambdaLR
 
-from models.wrapper import build_resnet50_afl
+from models.wrapper import build_resnet50, build_resnet50_afl
 from scripts.runtime.config import deep_get
 
 
 def build_model(name: str, num_classes: int, pretrained: bool) -> nn.Module:
-    if name not in {"resnet50", "resnet50_afl"}:
-        raise ValueError(f"Unsupported model: {name}")
-    return build_resnet50_afl(num_classes=num_classes, pretrained=pretrained)
+    if name == "resnet50":
+        return build_resnet50(num_classes=num_classes, pretrained=pretrained)
+    if name == "resnet50_afl":
+        return build_resnet50_afl(num_classes=num_classes, pretrained=pretrained)
+    raise ValueError(f"Unsupported model: {name}")
 
 
 def build_optimizer(model: nn.Module, config: dict[str, Any]) -> SGD:
@@ -23,9 +25,10 @@ def build_optimizer(model: nn.Module, config: dict[str, Any]) -> SGD:
 
     backbone_params = []
     classifier_params = []
-    defender_params = list(model.defender.parameters())  # type: ignore[attr-defined]
+    defender = getattr(model, "defender", None)
+    defender_params = list(defender.parameters()) if defender is not None else []
 
-    backbone = model.backbone  # type: ignore[attr-defined]
+    backbone = getattr(model, "backbone", model)
     for module in [
         backbone.conv1,
         backbone.bn1,
@@ -37,12 +40,17 @@ def build_optimizer(model: nn.Module, config: dict[str, Any]) -> SGD:
     classifier_params.extend(backbone.layer4.parameters())
     classifier_params.extend(backbone.fc.parameters())
 
+    parameter_groups = [
+        {"params": backbone_params, "lr": float(deep_get(config, "lr.backbone", 1e-4))},
+        {"params": classifier_params, "lr": float(deep_get(config, "lr.classifier", 1e-3))},
+    ]
+    if defender_params:
+        parameter_groups.append(
+            {"params": defender_params, "lr": float(deep_get(config, "lr.defender", 1e-3))}
+        )
+
     return SGD(
-        [
-            {"params": backbone_params, "lr": float(deep_get(config, "lr.backbone", 1e-4))},
-            {"params": classifier_params, "lr": float(deep_get(config, "lr.classifier", 1e-3))},
-            {"params": defender_params, "lr": float(deep_get(config, "lr.defender", 1e-3))},
-        ],
+        parameter_groups,
         momentum=float(deep_get(config, "optimizer.momentum", 0.9)),
         weight_decay=float(deep_get(config, "optimizer.weight_decay", 1e-4)),
     )
@@ -73,4 +81,3 @@ def build_scheduler(optimizer: SGD, config: dict[str, Any]) -> LambdaLR:
         optimizer,
         lr_lambda=[make_lr_lambda(group["lr"]) for group in optimizer.param_groups],
     )
-

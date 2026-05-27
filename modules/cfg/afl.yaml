@@ -1,0 +1,3 @@
+afl:
+  target_mask_ratio: 0.5
+  rho: 0.05

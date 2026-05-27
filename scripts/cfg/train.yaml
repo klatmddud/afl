@@ -1,16 +1,22 @@
 seed: 42
 device: auto
-amp: true
+amp: false
 output_dir: runs/train
 
 model:
   pretrained: true
 
 data:
-  train_images: ${KITTI_TRAIN_IMAGES}
-  train_annotations: ${KITTI_TRAIN_ANNOTATIONS}
-  val_images: ${KITTI_VAL_IMAGES}
-  val_annotations: ${KITTI_VAL_ANNOTATIONS}
+  name: ${CIFAR10_NAME}
+  presets:
+    cifar10:
+      name: ${CIFAR10_NAME}
+      root: ${CIFAR10_ROOT_DIR}
+      download: ${CIFAR10_DOWNLOAD}
+    cifar100:
+      name: ${CIFAR100_NAME}
+      root: ${CIFAR100_ROOT_DIR}
+      download: ${CIFAR100_DOWNLOAD}
 
 loader:
   batch_size: 16
@@ -18,7 +24,7 @@ loader:
   shuffle: true
 
 train:
-  epochs: 36
+  epochs: 24
   log_interval: 20
   eval_interval: 1
 
@@ -37,7 +43,3 @@ scheduler:
   type: cosine
   warmup_epochs: 2
   min_lr: 1e-5
-
-afl:
-  target_mask_ratio: 0.5
-  rho: 0.05

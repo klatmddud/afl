@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torchvision.models import ResNet50_Weights, resnet50
+from torchvision.models import ResNet50_Weights, resnet50 as torchvision_resnet50
 from torchvision.models.resnet import ResNet
 
 from modules.nn import FrequencyDefender
@@ -52,11 +52,7 @@ def build_resnet50_afl(
     min_gate: float = 0.1,
     temperature: float = 1.0,
 ) -> ResNet50AFL:
-    weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
-    backbone = resnet50(weights=weights)
-    if backbone.fc.out_features != num_classes:
-        backbone.fc = nn.Linear(backbone.fc.in_features, num_classes)
-
+    backbone = build_resnet50(num_classes=num_classes, pretrained=pretrained)
     defender = FrequencyDefender(
         hidden_channels=defender_hidden_channels,
         min_gate=min_gate,
@@ -64,3 +60,10 @@ def build_resnet50_afl(
     )
     return ResNet50AFL(backbone=backbone, defender=defender)
 
+
+def build_resnet50(num_classes: int = 1000, pretrained: bool = True) -> ResNet:
+    weights = ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+    model = torchvision_resnet50(weights=weights)
+    if model.fc.out_features != num_classes:
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model

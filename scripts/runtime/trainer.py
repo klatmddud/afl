@@ -51,6 +51,7 @@ class ClassificationTrainer:
         self.eval_interval = eval_interval
         self.scaler = torch.amp.GradScaler(device=device.type, enabled=amp_enabled)
         self.best_top1 = -1.0
+        self.afl_enabled = hasattr(model, "defender")
 
     @staticmethod
     def format_duration(seconds: float) -> str:
@@ -80,10 +81,12 @@ class ClassificationTrainer:
         fields = [
             f"total_loss={totals['loss'] / seen:.4f}",
             f"ce_loss={totals['ce'] / seen:.4f}",
-            f"ratio_loss={totals['ratio'] / seen:.4f}",
             f"top1={totals['top1'] / seen:.2f}",
-            f"mask_mean={totals['mask_mean'] / seen:.4f}",
         ]
+        if "ratio" in totals:
+            fields.append(f"ratio_loss={totals['ratio'] / seen:.4f}")
+        if "mask_mean" in totals:
+            fields.append(f"mask_mean={totals['mask_mean'] / seen:.4f}")
         if "top5" in totals:
             fields.append(f"top5={totals['top5'] / seen:.2f}")
         print(f"{prefix} {' '.join(fields)}")
@@ -113,7 +116,9 @@ class ClassificationTrainer:
 
     def train_one_epoch(self, epoch: int) -> dict[str, float]:
         self.model.train()
-        totals = {"loss": 0.0, "ce": 0.0, "ratio": 0.0, "top1": 0.0, "mask_mean": 0.0}
+        totals = {"loss": 0.0, "ce": 0.0, "top1": 0.0}
+        if self.afl_enabled:
+            totals.update({"ratio": 0.0, "mask_mean": 0.0})
         seen = 0
         epoch_started_at = time.perf_counter()
         total_steps = len(self.train_loader)
@@ -124,10 +129,18 @@ class ClassificationTrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
-                logits, aux = self.model(images, return_aux=True)
+                if self.afl_enabled:
+                    logits, aux = self.model(images, return_aux=True)
+                else:
+                    logits = self.model(images)
+                    aux = {}
                 ce_loss = F.cross_entropy(logits, target)
-                ratio_loss = mask_ratio_loss(aux["mask"], self.target_mask_ratio)
-                loss = ce_loss + self.rho * ratio_loss
+                if self.afl_enabled:
+                    ratio_loss = mask_ratio_loss(aux["mask"], self.target_mask_ratio)
+                    loss = ce_loss + self.rho * ratio_loss
+                else:
+                    ratio_loss = None
+                    loss = ce_loss
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -138,9 +151,10 @@ class ClassificationTrainer:
             seen += batch_size
             totals["loss"] += loss.item() * batch_size
             totals["ce"] += ce_loss.item() * batch_size
-            totals["ratio"] += ratio_loss.item() * batch_size
             totals["top1"] += top1.item() * batch_size
-            totals["mask_mean"] += aux["mask"].detach().mean().item() * batch_size
+            if self.afl_enabled and ratio_loss is not None:
+                totals["ratio"] += ratio_loss.item() * batch_size
+                totals["mask_mean"] += aux["mask"].detach().mean().item() * batch_size
 
             if self.log_interval > 0 and (step % self.log_interval == 0 or step == total_steps):
                 self.log_step("train", epoch, step, total_steps, epoch_started_at, totals, seen)
@@ -153,11 +167,11 @@ class ClassificationTrainer:
         totals = {
             "loss": 0.0,
             "ce": 0.0,
-            "ratio": 0.0,
             "top1": 0.0,
             "top5": 0.0,
-            "mask_mean": 0.0,
         }
+        if self.afl_enabled:
+            totals.update({"ratio": 0.0, "mask_mean": 0.0})
         seen = 0
         epoch_started_at = time.perf_counter()
         total_steps = len(self.val_loader)
@@ -166,20 +180,29 @@ class ClassificationTrainer:
             images = images.to(self.device, non_blocking=True)
             target = target.to(self.device, non_blocking=True)
             with torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled):
-                logits, aux = self.model(images, return_aux=True)
+                if self.afl_enabled:
+                    logits, aux = self.model(images, return_aux=True)
+                else:
+                    logits = self.model(images)
+                    aux = {}
                 ce_loss = F.cross_entropy(logits, target)
-                ratio_loss = mask_ratio_loss(aux["mask"], self.target_mask_ratio)
-                loss = ce_loss + self.rho * ratio_loss
+                if self.afl_enabled:
+                    ratio_loss = mask_ratio_loss(aux["mask"], self.target_mask_ratio)
+                    loss = ce_loss + self.rho * ratio_loss
+                else:
+                    ratio_loss = None
+                    loss = ce_loss
 
             top1, top5 = accuracy(logits, target, (1, 5))
             batch_size = target.numel()
             seen += batch_size
             totals["loss"] += loss.item() * batch_size
             totals["ce"] += ce_loss.item() * batch_size
-            totals["ratio"] += ratio_loss.item() * batch_size
             totals["top1"] += top1.item() * batch_size
             totals["top5"] += top5.item() * batch_size
-            totals["mask_mean"] += aux["mask"].mean().item() * batch_size
+            if self.afl_enabled and ratio_loss is not None:
+                totals["ratio"] += ratio_loss.item() * batch_size
+                totals["mask_mean"] += aux["mask"].mean().item() * batch_size
 
             if self.log_interval > 0 and (step % self.log_interval == 0 or step == total_steps):
                 self.log_step("eval", epoch, step, total_steps, epoch_started_at, totals, seen)
@@ -198,12 +221,12 @@ class ClassificationTrainer:
             "epoch": epoch,
             "lr_backbone": current_lrs[0],
             "lr_classifier": current_lrs[1],
-            "lr_defender": current_lrs[2],
+            "lr_defender": current_lrs[2] if len(current_lrs) > 2 else "",
             "train_loss": train_metrics["loss"],
             "train_ce": train_metrics["ce"],
-            "train_ratio": train_metrics["ratio"],
+            "train_ratio": train_metrics.get("ratio", ""),
             "train_top1": train_metrics["top1"],
-            "train_mask_mean": train_metrics["mask_mean"],
+            "train_mask_mean": train_metrics.get("mask_mean", ""),
             "val_loss": val_metrics.get("loss", ""),
             "val_ce": val_metrics.get("ce", ""),
             "val_ratio": val_metrics.get("ratio", ""),
@@ -243,10 +266,13 @@ class ClassificationTrainer:
                 f" val_loss={val_metrics['loss']:.4f}"
                 f" val_top1={val_metrics['top1']:.2f}"
                 f" val_top5={val_metrics['top5']:.2f}"
-                f" val_mask_mean={val_metrics['mask_mean']:.4f}"
             )
+            if "mask_mean" in val_metrics:
+                val_summary += f" val_mask_mean={val_metrics['mask_mean']:.4f}"
+        train_mask_summary = ""
+        if "mask_mean" in train_metrics:
+            train_mask_summary = f" train_mask_mean={train_metrics['mask_mean']:.4f}"
         print(
             f"epoch={epoch}/{self.epochs} train_loss={train_metrics['loss']:.4f} "
-            f"train_top1={train_metrics['top1']:.2f}"
-            f" train_mask_mean={train_metrics['mask_mean']:.4f}{val_summary}"
+            f"train_top1={train_metrics['top1']:.2f}{train_mask_summary}{val_summary}"
         )
